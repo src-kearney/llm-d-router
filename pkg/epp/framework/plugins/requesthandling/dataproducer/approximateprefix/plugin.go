@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -619,7 +620,7 @@ func (p *dataProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 			// peer fields by replica ID, so a global cap would drop whole
 			// replicas rather than oldest prompts.
 			seen := make(map[string]struct{})
-			var out [][]blockHash
+			var out [][]uint64
 			for _, v := range values {
 				set, ok := v.(*attrprefix.PrefixHashSet)
 				if !ok || set == nil {
@@ -629,16 +630,15 @@ func (p *dataProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 					if len(prompt) == 0 {
 						continue
 					}
-					hashes := uint64sToBlockHashes(prompt)
-					key := promptKey(hashes)
+					key := promptKeyUint64(prompt)
 					if _, ok := seen[key]; ok {
 						continue
 					}
 					seen[key] = struct{}{}
-					out = append(out, hashes)
+					out = append(out, slices.Clone(prompt))
 				}
 			}
-			return &attrprefix.PrefixHashSet{Prompts: promptsToUint64(out)}
+			return &attrprefix.PrefixHashSet{Prompts: out}
 		},
 	}
 }
