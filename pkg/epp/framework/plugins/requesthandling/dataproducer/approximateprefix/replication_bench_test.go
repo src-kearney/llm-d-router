@@ -60,8 +60,7 @@ type replicationBenchOptions struct {
 	redisAddress string
 }
 
-// Sequence support distinguishes the stream revision from its full-only base,
-// allowing identical benchmark source to measure both revisions.
+// Detect sequence support to benchmark both transport revisions with the same source.
 func replicationBenchModes() []string {
 	if _, ok := any(&attrprefix.PrefixHashSet{}).(interface{ SequenceBase() uint64 }); ok {
 		return []string{"full", "incremental"}
@@ -246,7 +245,7 @@ func (f *replicationBench) expected() [][]uint64 {
 	seen := make(map[string]bool)
 	for _, window := range f.windows {
 		for _, prompt := range window {
-			key := promptKey(uint64sToBlockHashes(prompt))
+			key := fmt.Sprint(prompt)
 			if !seen[key] {
 				seen[key] = true
 				out = append(out, prompt)

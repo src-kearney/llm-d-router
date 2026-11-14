@@ -272,3 +272,72 @@ func BenchmarkReplicationRedisTick(b *testing.B) {
 		}
 	}
 }
+
+func TestReplicationSnapshotOwnership(t *testing.T) {
+	f := newReplicationBench(t, "full", 2, 2)
+	p := f.producers[0]
+	spec := p.CrossReplicaState()
+	id := f.id()
+	p.recent.forget(id)
+	input := []blockHash{11, 12}
+	p.recent.record(id, input)
+	first := spec.Read(id).(*attrprefix.PrefixHashSet)
+	input[0] = 99
+	require.Equal(t, [][]uint64{{11, 12}}, first.Prompts)
+	require.Equal(t, first.Prompts, spec.Read(id).(*attrprefix.PrefixHashSet).Prompts)
+	clone := first.Clone().(*attrprefix.PrefixHashSet)
+	clone.Prompts[0][0] = 77
+	clone.Prompts[0] = append(clone.Prompts[0], 78)
+	require.Equal(t, [][]uint64{{11, 12}}, first.Prompts)
+	p.recent.record(id, []blockHash{13, 14, 15, 16})
+	require.Equal(t, [][]uint64{{13, 14, 15, 16}}, spec.Read(id).(*attrprefix.PrefixHashSet).Prompts)
+	p.recent.forget(id)
+	require.Empty(t, spec.Read(id).(*attrprefix.PrefixHashSet).Prompts)
+	p.recent.record(id, []blockHash{21, 22})
+	require.Equal(t, [][]uint64{{21, 22}}, spec.Read(id).(*attrprefix.PrefixHashSet).Prompts)
+	require.Equal(t, [][]uint64{{11, 12}}, first.Prompts)
+}
+
+func TestReplicationAggregateOwnership(t *testing.T) {
+	f := newReplicationBench(t, "full", 2, 2)
+	spec := f.producers[0].CrossReplicaState()
+	a := &attrprefix.PrefixHashSet{Prompts: [][]uint64{{1, 2}, {3}, {}, {1, 2}}}
+	b := &attrprefix.PrefixHashSet{Prompts: [][]uint64{{1}, {2, 3}, {3}}}
+	result := spec.Aggregate([]any{nil, a, b}).(*attrprefix.PrefixHashSet)
+	require.Equal(t, [][]uint64{{1, 2}, {3}, {1}, {2, 3}}, result.Prompts)
+	a.Prompts[0][0] = 99
+	b.Prompts[0][0] = 98
+	require.Equal(t, [][]uint64{{1, 2}, {3}, {1}, {2, 3}}, result.Prompts)
+	result.Prompts[1][0] = 97
+	require.Equal(t, uint64(3), a.Prompts[1][0])
+}
+
+func TestReplicationGetLifecycle(t *testing.T) {
+	for _, mode := range replicationBenchModes() {
+		t.Run(mode, func(t *testing.T) {
+			f := newReplicationBench(t, mode, 2, 2)
+			spec := f.producers[0].CrossReplicaState()
+			get := func() *attrprefix.PrefixHashSet {
+				value, ok, err := f.syncers[0].Get(f.ctx, spec, f.id())
+				require.NoError(t, err)
+				require.True(t, ok)
+				return value.(*attrprefix.PrefixHashSet)
+			}
+			before := get().Clone().(*attrprefix.PrefixHashSet)
+			require.ElementsMatch(t, f.expected(), before.Prompts)
+			f.producers[0].recent.forget(f.id())
+			f.producers[0].recent.record(f.id(), []blockHash{41, 42})
+			f.windows[0] = [][]uint64{{41, 42}}
+			require.ElementsMatch(t, f.expected(), get().Prompts)
+			require.NoError(t, f.syncers[1].Delete(f.ctx, spec.StateKey, f.id()))
+			require.NoError(t, f.syncers[0].Set(f.ctx, spec, f.id()))
+			require.Equal(t, [][]uint64{{41, 42}}, get().Prompts)
+			f.producers[1].recent.forget(f.id())
+			f.producers[1].recent.record(f.id(), []blockHash{51, 52})
+			f.windows[1] = [][]uint64{{51, 52}}
+			f.refresh(t)
+			require.ElementsMatch(t, f.expected(), get().Prompts)
+			require.NotEqual(t, before.Prompts, get().Prompts)
+		})
+	}
+}
