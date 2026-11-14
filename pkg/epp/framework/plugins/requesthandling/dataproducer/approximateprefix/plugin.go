@@ -610,8 +610,8 @@ func (p *dataProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 		AttributeKey: p.syncHashDK,
 		SyncDisabled: !p.syncCrossReplicaState,
 		Read: func(endpointID string) datalayer.Cloneable {
-			prompts, base := p.recent.snapshotWindow(endpointID)
-			return &attrprefix.PrefixHashSet{Prompts: promptsToUint64(prompts), Base: base}
+			prompts, base := p.recent.snapshotUint64(endpointID)
+			return &attrprefix.PrefixHashSet{Prompts: prompts, Base: base}
 		},
 		Aggregate: func(values []any) any {
 			// Each input is already capped by the publishing replica's

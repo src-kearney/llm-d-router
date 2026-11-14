@@ -184,3 +184,10 @@ func promptKeyUint64(hashes []uint64) string {
 	}
 	return string(b)
 }
+
+// snapshotUint64 copies hashes directly into the replication representation.
+func (w *recentWindow) snapshotUint64(endpointID string) ([][]uint64, uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return promptsToUint64(w.pending[endpointID]), w.base[endpointID]
+}
