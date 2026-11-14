@@ -18,6 +18,7 @@ package approximateprefix
 
 import (
 	"encoding/binary"
+	"slices"
 	"sync"
 
 	"github.com/llm-d/llm-d-router/pkg/common/clamp"
@@ -28,7 +29,7 @@ import (
 // hashes across prompts so cross-replica publish payloads stay small.
 type recentWindow struct {
 	mu      sync.Mutex
-	pending map[string][][]blockHash
+	pending map[string][][]uint64
 	// base is the generation of pending[endpointID][0]. It advances by one for
 	// each prompt trimmed, so a generation always names the same prompt.
 	base map[string]uint64
@@ -40,7 +41,7 @@ func newRecentWindow(max int) *recentWindow {
 		max = defaultLRUCapacityPerServer
 	}
 	return &recentWindow{
-		pending: make(map[string][][]blockHash),
+		pending: make(map[string][][]uint64),
 		base:    make(map[string]uint64),
 		max:     max,
 	}
@@ -60,8 +61,10 @@ func (w *recentWindow) record(endpointID string, hashes []blockHash) {
 	if len(prompt) > w.max {
 		prompt = prompt[:w.max]
 	}
-	cp := make([]blockHash, len(prompt))
-	copy(cp, prompt)
+	cp := make([]uint64, len(prompt))
+	for i, hash := range prompt {
+		cp[i] = uint64(hash)
+	}
 
 	buf := w.pending[endpointID]
 	buf = append(buf, cp)
@@ -82,7 +85,15 @@ func (w *recentWindow) snapshot(endpointID string) [][]blockHash {
 func (w *recentWindow) snapshotWindow(endpointID string) ([][]blockHash, uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return copyPromptHashes(w.pending[endpointID]), w.base[endpointID]
+	prompts := w.pending[endpointID]
+	if len(prompts) == 0 {
+		return nil, w.base[endpointID]
+	}
+	out := make([][]blockHash, len(prompts))
+	for i, prompt := range prompts {
+		out[i] = uint64sToBlockHashes(prompt)
+	}
+	return out, w.base[endpointID]
 }
 
 // forget drops the buffer for endpointID when the endpoint leaves the pool.
@@ -96,7 +107,7 @@ func (w *recentWindow) forget(endpointID string) {
 // trimPromptHashes drops oldest whole prompts until total hashes <= max and
 // reports how many it dropped. record caps each prompt at max before calling
 // it, so the last prompt always fits.
-func trimPromptHashes(prompts [][]blockHash, max int) ([][]blockHash, int) {
+func trimPromptHashes(prompts [][]uint64, max int) ([][]uint64, int) {
 	if max <= 0 || len(prompts) == 0 {
 		return prompts, 0
 	}
@@ -108,30 +119,17 @@ func trimPromptHashes(prompts [][]blockHash, max int) ([][]blockHash, int) {
 		dropped++
 	}
 	// Own the slice so a later append cannot overwrite retained prompts.
-	out := make([][]blockHash, len(prompts))
+	out := make([][]uint64, len(prompts))
 	copy(out, prompts)
 	return out, dropped
 }
 
-func promptHashCount(prompts [][]blockHash) int {
+func promptHashCount(prompts [][]uint64) int {
 	n := 0
 	for _, p := range prompts {
 		n += len(p)
 	}
 	return n
-}
-
-func copyPromptHashes(prompts [][]blockHash) [][]blockHash {
-	if len(prompts) == 0 {
-		return nil
-	}
-	out := make([][]blockHash, len(prompts))
-	for i, p := range prompts {
-		cp := make([]blockHash, len(p))
-		copy(cp, p)
-		out[i] = cp
-	}
-	return out
 }
 
 func promptsToUint64(prompts [][]blockHash) [][]uint64 {
@@ -183,4 +181,11 @@ func promptKeyUint64(hashes []uint64) string {
 		binary.LittleEndian.PutUint64(b[8+8*i:], h)
 	}
 	return string(b)
+}
+
+// snapshotUint64 borrows immutable prompts and owns the outer slice.
+func (w *recentWindow) snapshotUint64(endpointID string) ([][]uint64, uint64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.pending[endpointID]), w.base[endpointID]
 }
