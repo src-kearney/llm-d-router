@@ -38,13 +38,13 @@ func BenchmarkReplicationShape(b *testing.B) {
 		prompts, hashes int
 		options         replicationBenchOptions
 	}{
-		{"baseline", 125, 250, replicationBenchOptions{}},
-		{"prompts=25", 25, 1250, replicationBenchOptions{}},
-		{"prompts=625", 625, 50, replicationBenchOptions{}},
-		{"hashes=125000", 500, 250, replicationBenchOptions{}},
-		{"hashes=500000", 2000, 250, replicationBenchOptions{}},
-		{"overlap=50", 125, 250, replicationBenchOptions{overlap: 50}},
-		{"overlap=100", 125, 250, replicationBenchOptions{overlap: 100}},
+		{"baseline", 125, 250, replicationBenchOptions{peers: 1}},
+		{"prompts=25", 25, 1250, replicationBenchOptions{peers: 1}},
+		{"prompts=625", 625, 50, replicationBenchOptions{peers: 1}},
+		{"hashes=125000", 500, 250, replicationBenchOptions{peers: 1}},
+		{"hashes=500000", 2000, 250, replicationBenchOptions{peers: 1}},
+		{"overlap=50", 125, 250, replicationBenchOptions{peers: 1, overlap: 50}},
+		{"overlap=100", 125, 250, replicationBenchOptions{peers: 1, overlap: 100}},
 		{"peers=3", 125, 250, replicationBenchOptions{peers: 3}},
 		{"peers=7", 125, 250, replicationBenchOptions{peers: 7}},
 	}
@@ -56,7 +56,7 @@ func BenchmarkReplicationShape(b *testing.B) {
 			for i, p := range f.producers {
 				values[i] = p.CrossReplicaState().Read(f.id())
 			}
-			if tc.options.peers == 0 && tc.options.overlap == 0 {
+			if tc.options.peers == 1 && tc.options.overlap == 0 {
 				b.Run("Read", func(b *testing.B) {
 					var result any
 					b.ReportAllocs()
@@ -85,17 +85,17 @@ func BenchmarkReplicationRequest(b *testing.B) {
 		name    string
 		options replicationBenchOptions
 	}{
-		{"baseline", replicationBenchOptions{}},
-		{"endpoints=8", replicationBenchOptions{endpoints: 8}},
-		{"endpoints=16", replicationBenchOptions{endpoints: 16}},
+		{"baseline", replicationBenchOptions{peers: 1}},
+		{"endpoints=8", replicationBenchOptions{peers: 1, endpoints: 8}},
+		{"endpoints=16", replicationBenchOptions{peers: 1, endpoints: 16}},
 		{"peers=3", replicationBenchOptions{peers: 3}},
 		{"peers=7", replicationBenchOptions{peers: 7}},
-		{"overlap=50", replicationBenchOptions{overlap: 50}},
-		{"overlap=100", replicationBenchOptions{overlap: 100}},
-		{"query=128/match=0", replicationBenchOptions{queryBlocks: 128}},
-		{"query=128/match=128", replicationBenchOptions{queryBlocks: 128, matchBlocks: 128}},
-		{"query=512/match=0", replicationBenchOptions{queryBlocks: 512}},
-		{"query=512/match=128", replicationBenchOptions{queryBlocks: 512, matchBlocks: 128}},
+		{"overlap=50", replicationBenchOptions{peers: 1, overlap: 50}},
+		{"overlap=100", replicationBenchOptions{peers: 1, overlap: 100}},
+		{"query=128/match=0", replicationBenchOptions{peers: 1, queryBlocks: 128}},
+		{"query=128/match=128", replicationBenchOptions{peers: 1, queryBlocks: 128, matchBlocks: 128}},
+		{"query=512/match=0", replicationBenchOptions{peers: 1, queryBlocks: 512}},
+		{"query=512/match=128", replicationBenchOptions{peers: 1, queryBlocks: 512, matchBlocks: 128}},
 	}
 	for _, mode := range replicationBenchModes() {
 		for _, tc := range cases {
@@ -236,7 +236,7 @@ func BenchmarkReplicationRedisTick(b *testing.B) {
 					client := goredis.NewClient(&goredis.Options{Addr: address})
 					b.Cleanup(func() { _ = client.Close() })
 					require.NoError(b, client.FlushDB(b.Context()).Err())
-					f := newReplicationBenchWithOptions(b, mode, shape.prompts, shape.hashes, replicationBenchOptions{redisAddress: address})
+					f := newReplicationBenchWithOptions(b, mode, shape.prompts, shape.hashes, replicationBenchOptions{peers: 1, redisAddress: address})
 					// A second tick lets the replica that published first catch up.
 					f.refresh(b)
 					keys, err := client.Keys(b.Context(), "*").Result()
@@ -339,5 +339,80 @@ func TestReplicationGetLifecycle(t *testing.T) {
 			require.ElementsMatch(t, f.expected(), get().Prompts)
 			require.NotEqual(t, before.Prompts, get().Prompts)
 		})
+	}
+}
+
+func TestReplicationGetWindowBoundaries(t *testing.T) {
+	for _, mode := range replicationBenchModes() {
+		for _, peers := range []int{0, 1} {
+			for _, empty := range []bool{false, true} {
+				t.Run(fmt.Sprintf("mode=%s/peers=%d/empty-local=%t", mode, peers, empty), func(t *testing.T) {
+					f := newReplicationBenchWithOptions(t, mode, 2, 2, replicationBenchOptions{peers: peers})
+					require.Len(t, f.producers, peers+1)
+					p := f.producers[0]
+					spec := p.CrossReplicaState()
+					if empty {
+						p.recent.forget(f.id())
+						f.windows[0] = nil
+						f.bases[0] = 0
+					}
+					get := func() *attrprefix.PrefixHashSet {
+						value, ok, err := f.syncers[0].Get(f.ctx, spec, f.id())
+						require.NoError(t, err)
+						require.True(t, ok)
+						require.NotNil(t, value)
+						return value.(*attrprefix.PrefixHashSet)
+					}
+					held := get()
+					expected := held.Clone().(*attrprefix.PrefixHashSet)
+					require.ElementsMatch(t, f.expected(), held.Prompts)
+					public, ok := f.endpoint.Get(p.syncHashDK)
+					require.True(t, ok)
+					writable := public.(*attrprefix.PrefixHashSet)
+					if len(writable.Prompts) > 0 {
+						writable.Prompts[0][0] ^= 1
+					}
+					writable.Prompts = append(writable.Prompts, []uint64{99})
+					require.ElementsMatch(t, f.expected(), get().Prompts)
+					for i := range 3 {
+						f.append(0, []uint64{uint64(100 + i), uint64(200 + i)}, 2)
+					}
+					require.ElementsMatch(t, f.expected(), get().Prompts)
+					require.ElementsMatch(t, expected.Prompts, held.Prompts)
+					require.NoError(t, f.produce())
+					f.check(t)
+				})
+			}
+		}
+	}
+}
+
+// BenchmarkReplicationNoPeer measures direct Get and scoped Produce without a peer aggregate.
+func BenchmarkReplicationNoPeer(b *testing.B) {
+	for _, mode := range replicationBenchModes() {
+		for _, operation := range []string{"Get", "Produce"} {
+			b.Run("mode="+mode+"/"+operation, func(b *testing.B) {
+				f := newReplicationBenchWithOptions(b, mode, 1000, 500, replicationBenchOptions{peers: 0})
+				require.Len(b, f.producers, 1)
+				spec := f.producers[0].CrossReplicaState()
+				var result any
+				b.ReportAllocs()
+				for b.Loop() {
+					if operation == "Get" {
+						value, ok, err := f.syncers[0].Get(f.ctx, spec, f.id())
+						if err != nil || !ok {
+							b.Fatalf("Get: found=%t err=%v", ok, err)
+						}
+						result = value
+					} else if err := f.produce(); err != nil {
+						b.Fatal(err)
+					}
+				}
+				if operation == "Get" {
+					require.Equal(b, f.windows[0], result.(*attrprefix.PrefixHashSet).Prompts)
+				}
+				f.check(b)
+			})
+		}
 	}
 }

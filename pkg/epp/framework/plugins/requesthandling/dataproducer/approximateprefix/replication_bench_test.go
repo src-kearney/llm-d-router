@@ -69,14 +69,11 @@ func replicationBenchModes() []string {
 }
 
 func newReplicationBench(t testing.TB, mode string, prompts, hashes int) *replicationBench {
-	return newReplicationBenchWithOptions(t, mode, prompts, hashes, replicationBenchOptions{})
+	return newReplicationBenchWithOptions(t, mode, prompts, hashes, replicationBenchOptions{peers: 1})
 }
 
 func newReplicationBenchWithOptions(t testing.TB, mode string, prompts, hashes int, options replicationBenchOptions) *replicationBench {
 	t.Helper()
-	if options.peers == 0 {
-		options.peers = 1
-	}
 	if options.endpoints == 0 {
 		options.endpoints = 1
 	}
